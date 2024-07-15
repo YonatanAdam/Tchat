@@ -1,3 +1,4 @@
+use colored::Colorize;
 use crossterm::cursor::MoveTo;
 use crossterm::event::{poll, read, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::terminal::{self, Clear, ClearType};
@@ -36,12 +37,14 @@ fn main() {
     terminal::enable_raw_mode().unwrap();
     let mut stdout = stdout();
 
-    let bar_char = "═";
+    let bar_char = "═".white();
     let mut bar = bar_char.repeat(w as usize);
     let mut quit = false;
     let mut prompt = String::new();
     let mut chat = Vec::new();
     let mut buf = [0; 64];
+
+    let quit_msg = "Exiting program. Goodbye!".bright_blue().bold();
 
     while !quit {
         // Event handling loop
@@ -51,6 +54,7 @@ fn main() {
                     KeyEventKind::Press => match event.code {
                         KeyCode::Char(x) => {
                             if x == 'c' && event.modifiers.contains(KeyModifiers::CONTROL) {
+                                chat.push(format!("{}", quit_msg));
                                 quit = true;
                             } else {
                                 prompt.push(x);

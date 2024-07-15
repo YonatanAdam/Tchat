@@ -1,19 +1,23 @@
 use colored::Colorize;
-use std::collections::HashMap;
-use std::fmt::{self};
-use std::io::{Read, Write};
-use std::net::{IpAddr, Shutdown, SocketAddr, TcpListener, TcpStream};
-use std::result;
-use std::str;
-use std::sync::mpsc::{channel, Receiver, Sender};
-use std::sync::Arc;
-use std::thread;
-use std::time::{Duration, SystemTime};
+use getrandom::getrandom;
+use std::{
+    collections::HashMap,
+    fmt::{self, Write as OtherWrite},
+    io::{Read, Write},
+    net::{IpAddr, Shutdown, SocketAddr, TcpListener, TcpStream},
+    result, str,
+    sync::{
+        mpsc::{channel, Receiver, Sender},
+        Arc,
+    },
+    thread,
+    time::{Duration, SystemTime},
+};
 
 type Result<T> = result::Result<T, ()>;
 
 const PORT: u16 = 6969;
-const SAFE_MODE: bool = true;
+const SAFE_MODE: bool = false;
 const BAN_LIMIT: Duration = Duration::from_secs(10 * 60);
 const MESSAGE_RATE: Duration = Duration::from_secs(1);
 const STRIKE_LIMIT: i32 = 10;
@@ -56,9 +60,10 @@ struct Client {
     conn: Arc<TcpStream>,
     last_message: SystemTime,
     strike_count: i32,
+    authed: bool,
 }
 
-fn server(messages: Receiver<Message>) -> Result<()> {
+fn server(messages: Receiver<Message>, token: String) -> Result<()> {
     let mut clients = HashMap::<SocketAddr, Client>::new();
     let mut banned_mfs = HashMap::<IpAddr, SystemTime>::new();
     loop {
@@ -111,8 +116,17 @@ fn server(messages: Receiver<Message>) -> Result<()> {
                             conn: author.clone(),
                             last_message: now - 2 * MESSAGE_RATE,
                             strike_count: 0,
+                            authed: false,
                         },
                     );
+                    let token_str = "Please enter the Token:".bright_yellow().underline().bold();
+                    let _ = write!(author.as_ref(), "{}", token_str).map_err(|err| {
+                        print_error(format!(
+                            "could not send Token prompt to {}: {}",
+                            Sens(author_addr),
+                            Sens(err)
+                        ));
+                    });
                 }
             }
             Message::ClientDisconnected { author_addr } => {
@@ -124,15 +138,68 @@ fn server(messages: Receiver<Message>) -> Result<()> {
                     let now = SystemTime::now();
                     let diff = now
                         .duration_since(author.last_message)
-                        .expect("TODO: don't crash if the clock went backwards");
+                        .unwrap_or_else(|err| {
+                            print_error(format!("message rate check on new message: the clock might have gone backwards: {err}"));
+                            Duration::from_secs(0)
+                        });
                     if diff >= MESSAGE_RATE {
-                        if let Ok(_text) = str::from_utf8(&bytes) {
-                            print_info(format!("Client {author_addr} sent message {bytes:?}"));
-                            for (addr, client) in clients.iter() {
-                                if *addr != author_addr {
-                                    let _ = client.conn.as_ref().write_all(&bytes).and_then(|_| client.conn.as_ref().flush()).map_err(|err| {
+                        if let Ok(text) = str::from_utf8(&bytes) {
+                            author.last_message = now;
+                            author.strike_count = 0;
+
+                            let bytes_without_last = if !bytes.is_empty() {
+                                &bytes[..bytes.len() - 1]
+                            } else {
+                                &bytes[..]
+                            };
+
+                            if author.authed {
+                                print_info(format!(
+                                    "Client {author_addr} sent message {bytes_without_last:?}"
+                                ));
+                                for (addr, client) in clients.iter() {
+                                    if *addr != author_addr && client.authed {
+                                        let _ = writeln!(client.conn.as_ref(), "{text}").map_err(|err| {
                                         print_error(format!("could not broadcast message to all the clients from {author_addr}: {err}"))
                                     });
+                                    }
+                                }
+                            } else {
+                                let trimmed_text = text.trim();
+                                let invalid_token_msg =
+                                    "Invalid token!, disconnecting in 3.. 2.. 1..".red().bold();
+                                if trimmed_text == token {
+                                    author.authed = true;
+                                    let welcome_msg = "Welcome to the Club!".green().bold();
+                                    let _ = writeln!(author.conn.as_ref(), "{}", welcome_msg)
+                                        .map_err(|err| {
+                                            print_error(format!(
+                                                "could not send welcome message to {}: {}",
+                                                Sens(author_addr),
+                                                Sens(err)
+                                            ));
+                                        });
+                                } else {
+                                    print_info(format!(
+                                        "{} failed authorization!",
+                                        Sens(author_addr)
+                                    ));
+                                    let _ = writeln!(author.conn.as_ref(), "{}", invalid_token_msg)
+                                        .map_err(|err| {
+                                            print_error(format!(
+                                            "could not notify client {} about invalid token: {}",
+                                            Sens(author_addr),
+                                            Sens(err)
+                                        ));
+                                        });
+                                    let _ = author.conn.shutdown(Shutdown::Both).map_err(|err| {
+                                        print_error(format!(
+                                            "could not shutdown {}: {}",
+                                            Sens(author_addr),
+                                            Sens(err)
+                                        ))
+                                    });
+                                    clients.remove(&author_addr);
                                 }
                             }
                         } else {
@@ -182,13 +249,16 @@ fn client(stream: Arc<TcpStream>, messages: Sender<Message>) -> Result<()> {
     let author_addr = stream.peer_addr().map_err(|err| {
         print_error(format!("could not get peer address: {err}"));
     })?;
+
     messages
         .send(Message::ClientConnected {
             author: stream.clone(),
         })
         .map_err(|err| {
             print_error(format!(
-                "could not sent message to the server thread: {err}"
+                "could not sent message from {author_addr} to the server thread: {err}",
+                author_addr = Sens(author_addr),
+                err = Sens(err)
             ))
         })?;
 
@@ -235,6 +305,18 @@ fn client(stream: Arc<TcpStream>, messages: Sender<Message>) -> Result<()> {
 }
 
 fn main() -> Result<()> {
+    let mut buffer: [u8; 16] = [0; 16];
+    let _ = getrandom(&mut buffer).map_err(|err| {
+        print_error(format!("could not generate random access token: {err}"));
+    });
+
+    let mut token = String::new();
+    for x in buffer.iter() {
+        let _ = write!(&mut token, "{x:02X}");
+    }
+
+    println!("Token: {token}");
+
     let address = format!("0.0.0.0:{PORT}");
     let listener = TcpListener::bind(&address).map_err(|err| {
         print_error(format!("could not bind {address}: {}", Sens(err)));
@@ -242,7 +324,7 @@ fn main() -> Result<()> {
     print_info(format!("listening to address: {}", address));
 
     let (message_sender, message_receiver) = channel();
-    thread::spawn(|| server(message_receiver));
+    thread::spawn(|| server(message_receiver, token));
 
     for stream in listener.incoming() {
         match stream {
