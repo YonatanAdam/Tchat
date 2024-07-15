@@ -1,11 +1,11 @@
 # **Tch@** (Tchat)
-# Quick Start
-## Server
+## Quick Start
+### Server
 start the server
 ```console
 $ cargo run --bin server
 ```
-## Client
+### Client
 connect to the server
 ```console
 $ cargo run --bin client
