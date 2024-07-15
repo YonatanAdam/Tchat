@@ -4,9 +4,9 @@ use crossterm::event::{poll, read, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::terminal::{self, Clear, ClearType};
 use std::io::{stdout, ErrorKind, Read, Write};
 use std::net::TcpStream;
-use std::str;
 use std::thread;
 use std::time::Duration;
+use std::{env, str};
 
 struct Rect {
     x: usize,
@@ -29,7 +29,11 @@ fn chat_window(buffer: &mut String, chat: &[String], boundary: Rect) {
 }
 
 fn main() {
-    let mut stream = TcpStream::connect("127.0.0.1:6969").unwrap();
+    let mut args = env::args();
+    let _program = args.next().expect("program name");
+    let ip = args.next().unwrap();
+
+    let mut stream = TcpStream::connect(format!("{ip}:6969")).unwrap();
     stream.set_nonblocking(true).unwrap();
 
     let (mut w, mut h) = terminal::size().unwrap();
