@@ -2,11 +2,11 @@
 # Quick Start
 ## Server
 start the server
-```
-$ cargo run
+```console
+$ cargo run --bin server
 ```
 ## Client
 connect to the server
-```
-$ telnet 127.0.0.1 6969
+```console
+$ cargo run --bin client
 ```
