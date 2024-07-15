@@ -44,9 +44,6 @@ fn print_info<T: fmt::Display>(message: T) {
 }
 
 enum Message {
-    // Ban {
-    //     ip: IpAddr,
-    // },
     ClientConnected {
         author: Arc<TcpStream>,
     },
@@ -63,9 +60,10 @@ struct Client {
     conn: Arc<TcpStream>,
     last_message: SystemTime,
     strike_count: i32,
+    authed: bool,
 }
 
-fn server(messages: Receiver<Message>) -> Result<()> {
+fn server(messages: Receiver<Message>, token: String) -> Result<()> {
     let mut clients = HashMap::<SocketAddr, Client>::new();
     let mut banned_mfs = HashMap::<IpAddr, SystemTime>::new();
     loop {
@@ -118,8 +116,17 @@ fn server(messages: Receiver<Message>) -> Result<()> {
                             conn: author.clone(),
                             last_message: now - 2 * MESSAGE_RATE,
                             strike_count: 0,
+                            authed: false,
                         },
                     );
+                    let token_str = "Please enter the Token:".bright_yellow().underline().bold();
+                    let _ = write!(author.as_ref(), "{}", token_str).map_err(|err| {
+                        print_error(format!(
+                            "could not send Token prompt to {}: {}",
+                            Sens(author_addr),
+                            Sens(err)
+                        ));
+                    });
                 }
             }
             Message::ClientDisconnected { author_addr } => {
@@ -131,15 +138,68 @@ fn server(messages: Receiver<Message>) -> Result<()> {
                     let now = SystemTime::now();
                     let diff = now
                         .duration_since(author.last_message)
-                        .expect("TODO: don't crash if the clock went backwards");
+                        .unwrap_or_else(|err| {
+                            print_error(format!("message rate check on new message: the clock might have gone backwards: {err}"));
+                            Duration::from_secs(0)
+                        });
                     if diff >= MESSAGE_RATE {
-                        if let Ok(_text) = str::from_utf8(&bytes) {
-                            print_info(format!("Client {author_addr} sent message {bytes:?}"));
-                            for (addr, client) in clients.iter() {
-                                if *addr != author_addr {
-                                    let _ = client.conn.as_ref().write_all(&bytes).and_then(|_| client.conn.as_ref().flush()).map_err(|err| {
+                        if let Ok(text) = str::from_utf8(&bytes) {
+                            author.last_message = now;
+                            author.strike_count = 0;
+
+                            let bytes_without_last = if !bytes.is_empty() {
+                                &bytes[..bytes.len() - 1]
+                            } else {
+                                &bytes[..]
+                            };
+
+                            if author.authed {
+                                print_info(format!(
+                                    "Client {author_addr} sent message {bytes_without_last:?}"
+                                ));
+                                for (addr, client) in clients.iter() {
+                                    if *addr != author_addr && client.authed {
+                                        let _ = writeln!(client.conn.as_ref(), "{text}").map_err(|err| {
                                         print_error(format!("could not broadcast message to all the clients from {author_addr}: {err}"))
                                     });
+                                    }
+                                }
+                            } else {
+                                let trimmed_text = text.trim();
+                                let invalid_token_msg =
+                                    "Invalid token!, disconnecting in 3.. 2.. 1..".red().bold();
+                                if trimmed_text == token {
+                                    author.authed = true;
+                                    let welcome_msg = "Welcome to the Club!".green().bold();
+                                    let _ = writeln!(author.conn.as_ref(), "{}", welcome_msg)
+                                        .map_err(|err| {
+                                            print_error(format!(
+                                                "could not send welcome message to {}: {}",
+                                                Sens(author_addr),
+                                                Sens(err)
+                                            ));
+                                        });
+                                } else {
+                                    print_info(format!(
+                                        "{} failed authorization!",
+                                        Sens(author_addr)
+                                    ));
+                                    let _ = writeln!(author.conn.as_ref(), "{}", invalid_token_msg)
+                                        .map_err(|err| {
+                                            print_error(format!(
+                                            "could not notify client {} about invalid token: {}",
+                                            Sens(author_addr),
+                                            Sens(err)
+                                        ));
+                                        });
+                                    let _ = author.conn.shutdown(Shutdown::Both).map_err(|err| {
+                                        print_error(format!(
+                                            "could not shutdown {}: {}",
+                                            Sens(author_addr),
+                                            Sens(err)
+                                        ))
+                                    });
+                                    clients.remove(&author_addr);
                                 }
                             }
                         } else {
@@ -185,68 +245,10 @@ fn server(messages: Receiver<Message>) -> Result<()> {
     }
 }
 
-fn authorize(stream: &Arc<TcpStream>, addr: &SocketAddr, token: &str) -> Result<()> {
-    let mut buf: [u8; 32] = [0; 32];
-    let n = stream.as_ref().read(&mut buf).map_err(|err| {
-        print_error(format!(
-            "could not read authorization token from {addr}: {err}",
-            addr = Sens(addr),
-            err = Sens(err)
-        ))
-    })?;
-    if n < buf.len() {
-        print_error(format!(
-            "didn't fully read the authorization token: only {n} bytes read"
-        ));
-        return Err(());
-    }
-    let user_token = str::from_utf8(&buf[0..n]).map_err(|err| {
-        print_error(format!("token is not a valid UTF-8: {err}"));
-    });
-    if user_token != Ok(token) {
-        print_error(format!("user provided invalid token"));
-        return Err(());
-    }
-
-    Ok(())
-}
-
-fn client(stream: Arc<TcpStream>, messages: Sender<Message>, token: String) -> Result<()> {
+fn client(stream: Arc<TcpStream>, messages: Sender<Message>) -> Result<()> {
     let author_addr = stream.peer_addr().map_err(|err| {
         print_error(format!("could not get peer address: {err}"));
     })?;
-    let _ = write!(stream.as_ref(), "Token: ").map_err(|err| {
-        print_error(format!(
-            "could not send Token prompt to {}: {}",
-            Sens(author_addr),
-            Sens(err)
-        ));
-    });
-    let _ = authorize(&stream, &author_addr, &token).map_err(|()| {
-        let _ = writeln!(stream.as_ref(), "Invalid token!, disconnecting...").map_err(|err| {
-            print_error(format!(
-                "could not notify client {} about invalid token: {}",
-                Sens(author_addr),
-                Sens(err)
-            ));
-        });
-        let _ = stream.shutdown(Shutdown::Both).map_err(|err| {
-            print_error(format!(
-                "could not shutdown {}: {}",
-                Sens(author_addr),
-                Sens(err)
-            ))
-        });
-    });
-
-    let _ = writeln!(stream.as_ref(), "Welcome to the Club!").map_err(|err| {
-        print_info(format!("{} authorized!", Sens(author_addr)));
-        print_error(format!(
-            "could not send welcome message to {}: {}",
-            Sens(author_addr),
-            Sens(err)
-        ));
-    });
 
     messages
         .send(Message::ClientConnected {
@@ -254,7 +256,9 @@ fn client(stream: Arc<TcpStream>, messages: Sender<Message>, token: String) -> R
         })
         .map_err(|err| {
             print_error(format!(
-                "could not sent message to the server thread: {err}"
+                "could not sent message from {author_addr} to the server thread: {err}",
+                author_addr = Sens(author_addr),
+                err = Sens(err)
             ))
         })?;
 
@@ -320,15 +324,14 @@ fn main() -> Result<()> {
     print_info(format!("listening to address: {}", address));
 
     let (message_sender, message_receiver) = channel();
-    thread::spawn(|| server(message_receiver));
+    thread::spawn(|| server(message_receiver, token));
 
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
                 let stream = Arc::new(stream);
                 let message_sender = message_sender.clone();
-                let token = token.clone();
-                thread::spawn(|| client(stream, message_sender, token));
+                thread::spawn(|| client(stream, message_sender));
             }
             Err(err) => {
                 print_error(format!("could not accept connection: {err}"));
