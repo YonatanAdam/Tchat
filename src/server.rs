@@ -12,14 +12,15 @@ use std::time::{Duration, SystemTime};
 
 type Result<T> = result::Result<T, ()>;
 
+const PORT: u16 = 6969;
 const SAFE_MODE: bool = true;
 const BAN_LIMIT: Duration = Duration::from_secs(10 * 60);
 const MESSAGE_RATE: Duration = Duration::from_secs(1);
 const STRIKE_LIMIT: i32 = 10;
 
-struct Sensitive<T>(T);
+struct Sens<T>(T);
 
-impl<T: fmt::Display> fmt::Display for Sensitive<T> {
+impl<T: fmt::Display> fmt::Display for Sens<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let Self(inner) = self;
         if SAFE_MODE {
@@ -108,7 +109,7 @@ fn server(messages: Receiver<Message>) -> Result<()> {
                         author_addr.clone(),
                         Client {
                             conn: author.clone(),
-                            last_message: now,
+                            last_message: now - 2 * MESSAGE_RATE,
                             strike_count: 0,
                         },
                     );
@@ -129,7 +130,7 @@ fn server(messages: Receiver<Message>) -> Result<()> {
                             print_info(format!("Client {author_addr} sent message {bytes:?}"));
                             for (addr, client) in clients.iter() {
                                 if *addr != author_addr {
-                                    let _ = client.conn.as_ref().write(&bytes).map_err(|err| {
+                                    let _ = client.conn.as_ref().write_all(&bytes).and_then(|_| client.conn.as_ref().flush()).map_err(|err| {
                                         print_error(format!("could not broadcast message to all the clients from {author_addr}: {err}"))
                                     });
                                 }
@@ -234,9 +235,9 @@ fn client(stream: Arc<TcpStream>, messages: Sender<Message>) -> Result<()> {
 }
 
 fn main() -> Result<()> {
-    let address = "0.0.0.0:6969";
-    let listener = TcpListener::bind(address).map_err(|err| {
-        print_error(format!("could not bind {address}: {}", Sensitive(err)));
+    let address = format!("0.0.0.0:{PORT}");
+    let listener = TcpListener::bind(&address).map_err(|err| {
+        print_error(format!("could not bind {address}: {}", Sens(err)));
     })?;
     print_info(format!("listening to address: {}", address));
 
@@ -251,7 +252,7 @@ fn main() -> Result<()> {
                 thread::spawn(|| client(stream, message_sender));
             }
             Err(err) => {
-                print_error(format!("could not accept connection: {}", err));
+                print_error(format!("could not accept connection: {err}"));
             }
         }
     }
