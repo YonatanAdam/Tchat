@@ -15,5 +15,5 @@ $ cargo run --bin server
 connect to the server
 
 ```console
-$ cargo run --bin client <IP>
+$ cargo run --bin client <address>
 ```
